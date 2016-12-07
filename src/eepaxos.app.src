@@ -1,0 +1,12 @@
+{application, eepaxos,
+ [
+  {description, "Egalitarian Paxos written in Erlang"},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { eepaxos_app, []}},
+  {env, []}
+ ]}.
