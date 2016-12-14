@@ -16,9 +16,9 @@
 
 -export([start_link/0, init/1, 
 		propose/2,
-		preaccept/5,
+		preaccept/6,
 		preaccept_handle/6,
-		paxos_accept_request/5,
+		paxos_accept_request/6,
 		paxos_accept_response/5,
 		handle_call/3,
 		handle_cast/2, 
@@ -31,12 +31,12 @@
 				replicaId = -1, %replica ID
 				replicas = [], 
 				numToSend = 0 :: integer(),
-				fastPathNum = 0, 
 				totalReplicaNo = 1 :: integer(),
-				ballotId = 0}).
+				epoch = 0}).
 -type state() :: preaccepted | accepted | commited | executed.
 
 -record(inst, {key
+		, ballot :: ballot_num()
 		, cmd  = #eepaxos_command{}
 		, deps = []
 		, seq = -1
@@ -64,17 +64,18 @@ start_link() ->
 
 init([]) -> 
 	error_logger:info_msg("init"),
-	ets:new(inst, [ordered_set, named_table, {keypos, #inst.key}]),
-	ets:new(lbk, [ordered_set, named_table, {keypos, #lbk.key}]),
+	ets:new(inst, [ordered_set, named_table, {keypos, #inst.key}, public, {write_concurrency, true}, {read_concurrency, true}]),
+	ets:new(lbk, [ordered_set, named_table, {keypos, #lbk.key}, public, {write_concurrency, true}, {read_concurrency, true}]),
 
-	lists:foreach(fun(NodeName) ->
-		put(list_to_atom("conf_" ++ atom_to_list(NodeName)), [])
-	end, [node() | nodes()]),
 
 	ets:new(maxSeqPerKey, [ordered_set, named_table]),
 	Replicas = ['b@Sungkyus-MacBook-Pro-2.local', 'a@Sungkyus-MacBook-Pro-2.local', 'c@Sungkyus-MacBook-Pro-2.local'],
 	NoFQuorum = trunc(length(Replicas)/2),
 	
+	lists:foreach(fun(NodeName) ->
+		put(list_to_atom("conf_" ++ atom_to_list(NodeName)), [])
+	end, Replicas),
+
 	 {ok, #state{
 		instNo = 0, 
 		replicaId = 0,
@@ -94,21 +95,37 @@ commit_request(ReplicaId, InstNo, Command, Deps, Seq) ->
 	error_logger:info_msg("process:commit_reqest~n"),
 	gen_server:cast(?MODULE, {commit_request, ReplicaId, InstNo, Command, Deps, Seq}).
 
-preaccept(ReplicaId, InstNo, Command, Deps, Seq) ->
+preaccept(Ballot, ReplicaId, InstNo, Command, Deps, Seq) ->
 	error_logger:info_msg("process:preaccept_request~n"),
-	gen_server:cast(?MODULE, {preaccept, ReplicaId, InstNo, Command, Deps, Seq}).
+	gen_server:cast(?MODULE, {preaccept, Ballot, ReplicaId, InstNo, Command, Deps, Seq}).
 
 preaccept_handle(ReplicaId, InstNo, Command, Deps, Seq, Changed) ->
 	error_logger:info_msg("process:preaccept_response~n"),
 	gen_server:cast(?MODULE, {preaccept_handle, ReplicaId, InstNo, Command, Deps, Seq, Changed}).
 
-paxos_accept_request(ReplicaId, InstNo, Command, Deps, Seq) ->
+paxos_accept_request(Ballot, ReplicaId, InstNo, Command, Deps, Seq) ->
 	error_logger:info_msg("process:paxos_accept_request called~n"),
-	gen_server:cast(?MODULE, {paxos_accept_request, ReplicaId, InstNo, Command, Deps, Seq}).
+	gen_server:cast(?MODULE, {paxos_accept_request, Ballot,  ReplicaId, InstNo, Command, Deps, Seq}).
 
 paxos_accept_response(ReplicaId, InstNo, Command, Deps, Seq) ->
 	error_logger:info_msg("process:paxos_accept_response called~n"),
 	gen_server:cast(?MODULE, {paxos_accept_response, ReplicaId, InstNo, Command, Deps, Seq}).
+
+start_prepare(Command) when record(Command, eepaxos_command) ->
+	error_logger:info_msg("process:start_prepare~n"),
+	gen_server:cast(?MODULE, {start_prepare, Command}).
+
+explicit_prepare_request(Ballot, ReplicaId, InstNo, Command, Deps, Seq) ->
+	error_logger:info_msg("process:paxos_accept_response called~n"),
+	gen_server:cast(?MODULE, {explicit_prepare_request, Ballot, ReplicaId, InstNo, Command, Deps, Seq}).
+
+explicit_prepare_response(ReplicaId, InstNo, Command, Deps, Seq) ->
+	error_logger:info_msg("process:paxos_accept_response called~n"),
+	gen_server:cast(?MODULE, {explicit_prepare_response, ReplicaId, InstNo, Command, Deps, Seq}).
+
+try_preaccept(ReplicaId, InstNo, Command, Deps, Seq) ->
+	error_logger:info_msg("process:paxos_accept_response called~n"),
+	gen_server:cast(?MODULE, {explicit_prepare_response, ReplicaId, InstNo, Command, Deps, Seq}).
 
 handle_call({propose, Command}, From, State) ->
 	error_logger:info_msg("leader executes handle_call(propose)~n"),
@@ -133,7 +150,10 @@ handle_call({propose, Command}, From, State) ->
 
 	ets:insert(maxSeqPerKey, {Command#eepaxos_command.key, Seq}), %insertion updates the record
 	
-	ets:insert(inst, #inst{key = {node(), InstNo}
+	Ballot = {State#state.epoch, 0, node()},
+	ets:insert(inst, #inst{
+		ballot = Ballot
+		,key = {node(), InstNo}
 		, cmd  = Command
 		, deps = Deps
 		, seq = Seq
@@ -158,31 +178,19 @@ handle_call({propose, Command}, From, State) ->
 		_ -> put(ConfName, lists:keyreplace(Command#eepaxos_command.key, 1, ConfForR, {Command#eepaxos_command.key, InstNo}))
 	end,
 	
-	%multicall quorum of nodes. Since preaccept is ayncronous call to the gen_server it doesn't block.
-	% Return value is ok unless it fails
-% 	apply(eepaxos_process, preaccept, [node(), InstNo, Command, Deps, Seq]),
-%
-%	if 
-%		length(Quorum) > 0 ->
-	%rpc:multicall(Quorum, eepaxos_process, preaccept, [node(), InstNo, Command, Deps, Seq]),
 	ListToSend = lists:subtract(State#state.replicas, [node()]),
 	NumToSend =  State#state.numToSend,
 	error_logger:info_msg("preaccept_request send to ~w of ~w~n", [NumToSend, ListToSend]),
-	make_call(ListToSend, numToSend, eepaxos_process, preaccept, [node(), InstNo, Command, Deps, Seq]),
-%		true -> ok
-%	end,
-
-	% update state and return
-	%State1 = State#state{instNo=InstNo},
+	Ok = make_call(ListToSend, NumToSend, eepaxos_process, preaccept, [Ballot, node(), InstNo, Command, Deps, Seq]),
 	error_logger:info_msg("finishing handle_call(propose)"),
-	{reply, ok, State#state{instNo = InstNo}}.
 
-handle_cast({preaccept, ReplicaId, InstNo, Command, Deps, Seq}, State) -> %acceptor handler
+	{reply, Ok, State#state{instNo = InstNo}}.
+%==================================================================
+%	preaccept
+%==================================================================
+handle_cast({preaccept, Ballot, ReplicaId, InstNo, Command, Deps, Seq}, State) -> %acceptor handler
 %	?TEST_CALL({{self(), node()}, {preaccept, Command}}),
 	error_logger:info_msg("Acceptor(~w) executes handle_cast(preaccept_request)~n", [node()]),
-	%TODO: handle failure recovery
-	%TODO: handle delayed message
-%	Updated = false,
 	Updated = make_ref(),
 	put(Updated, false),
 	% update attributes
@@ -215,7 +223,9 @@ handle_cast({preaccept, ReplicaId, InstNo, Command, Deps, Seq}, State) -> %accep
 	end,
 
 	% update local data
-	ets:insert(inst, #inst{key = {ReplicaId, InstNo}
+	ets:insert(inst, #inst{
+		ballot = Ballot
+		,key = {ReplicaId, InstNo}
 		, cmd  = Command
 		, deps = Deps
 		, seq = SeqNew
@@ -250,7 +260,7 @@ handle_cast({preaccept, ReplicaId, InstNo, Command, Deps, Seq}, State) -> %accep
 
 handle_cast({preaccept_handle, ReplicaId, InstNo, Command, Deps, Seq, ChangeState}, State) -> %acceptor handler
 	error_logger:info_msg("leader executes handle_cast(preaccept_response)"),
-%TODO skip if instance state is accepted/commited. 
+	
 	PokNo = ets:lookup_element(lbk, {ReplicaId, InstNo}, #lbk.preacceptoks) + 1,
 	ets:update_element(lbk, {ReplicaId, InstNo}, {#lbk.preacceptoks, PokNo}),
 %TODO: handle the case in which instance has moved away from preaccept phase. It's possible that quorum of node already preaccepted
@@ -305,39 +315,125 @@ handle_cast({preaccept_handle, ReplicaId, InstNo, Command, Deps, Seq, ChangeStat
 	error_logger:info_msg("finishing handle_cast(preaccept_response).~n"),
 	{noreply, State};
 
-handle_cast({paxos_accept_request, ReplicaId, InstNo, Command, Deps, Seq}, State) -> 
+handle_cast({paxos_accept_request, Ballot, ReplicaId, InstNo, Command, Deps, Seq}, State) -> 
 	error_logger:info_msg("acceptor(~w) executes handle_cast(paxos_accept_request)~n", [node()]),
-
-	ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, accepted}),
-	make_call([ReplicaId], 1, eepaxos_process, paxos_accept_response, [ReplicaId, InstNo, Command, Deps, Seq]),
-	%rpc:call(ReplicaId, eepaxos_process, paxos_accept_response, [ReplicaId, InstNo, Command, Deps, Seq]),
+	AcceptedInst = ets:lookup(inst, {ReplicaId, InstNo}),
+	
+	if 
+		is_record(AcceptedInst, inst) andalso Ballot >  AcceptedInst#inst.ballot -> 
+ % it hasn't seen any request larger than this ballot
+			ets:insert(inst, #inst{key = {ReplicaId, InstNo}
+											, cmd  = Command
+											, deps = Deps
+											, seq = Seq 
+											, state = accepted}),
+			make_call([ReplicaId], 1, eepaxos_process, paxos_accept_response, [ReplicaId, InstNo, Command, Deps, Seq]);
+		true -> % not newer. As in paxos algorithm, reply with NACK 
+			make_call([ReplicaId], 1, eepaxos_process, paxos_accept_response, [ReplicaId, InstNo, nack, undefined, undefined])
+	end, 
 	error_logger:info_msg("finishing handle_cast(paxos_accept_request).~n"),
 	{noreply, State};
 
 handle_cast({paxos_accept_response, ReplicaId, InstNo, Command, Deps, Seq}, State) -> 
 	error_logger:info_msg("leader handle_cast(paxos_accept_response)~n"),
-	%TODO: skip if accepted/commited
-	
-	I = ets:lookup_element(lbk, {ReplicaId, InstNo}, #lbk.acceptoks) + 1,
-	ets:update_element(lbk, {ReplicaId, InstNo}, {#lbk.acceptoks, I}),
-	
-	State2  = if 
-		I >= State#state.numToSend -> 
-			runCommit({State, ReplicaId, InstNo, Command, Deps, Seq}, State);
-		true -> State
-	end,
-
-	error_logger:info_msg("finishing handle_cast(paxos_accept_response)~n"),
-	{noreply, State2};
+	Inst = ets:lookup(inst, {ReplicaId, InstNo}), 
+	if Inst#inst.state > accepted -> % finished processing
+			{noreply, State};
+		true -> 
+			if Command =:= nack -> % acceptor prepared or accepted for higher ballot
+					{noreply, State};
+				true ->
+					I = ets:lookup_element(lbk, {ReplicaId, InstNo}, #lbk.acceptoks) + 1,
+					ets:update_element(lbk, {ReplicaId, InstNo}, {#lbk.acceptoks, I}),
+					
+					State2  = if 
+						I >= State#state.numToSend -> 
+							runCommit({State, ReplicaId, InstNo, Command, Deps, Seq}, State);
+						true -> State
+					end,
+					error_logger:info_msg("finishing handle_cast(paxos_accept_response)~n"),
+					{noreply, State2}
+			end
+	end;
 
 handle_cast({commit_request, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
 	error_logger:info_msg("acceptor (~w) commit_request - ~w ~w ~w ~w ~w~n", [node(), ReplicaId, InstNo, Command, Deps, Seq]),
 	%update instance with commited state. protocol ends
 	ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, commited}),
+	{noreply, State};
+
+handle_cast({start_explicit_prepare, Ballot, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
+	% this node is potentially new command leader for the instance. 
+	error_logger:info_msg("new leader(~w) start_explicit_prepare- ~w ~w ~w ~w ~w~n", [node(), ReplicaId, InstNo, Command, Deps, Seq]),
+	% safe to assume it is not commited
+	
+	Inst = ets:lookup(inst, {ReplicaId, InstNo}),
+	#inst{ballot = {E, S, _}, state = St} = Inst,
+	case St of
+		commited -> ok;
+		accepted -> ok
+	end
+
+	ets:insert(inst, #lbk{}),
+
+	Ballot = {E, S+1, node()},
+	
+	make_call(lists:subtract(State#state.replicas, [node()]), State#state.numToSend, eepaxos_process,
+				explicit_prepare_request, [Ballot, LeaderReplica, ReplicaId, InstNo, Command, Deps, Seq]),
+	{noreply, State};
+handle_cast({explicit_prepare_request, Ballot, LeaderReplica, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
+	error_logger:info_msg("acceptor (~w) explicit_prepare_request- ~w ~w ~w ~w ~w~n", [node(), ReplicaId, InstNo, Command, Deps, Seq]),
+	% Handle prepare request as in paxos
+	Inst = ets:lookup(inst, {ReplicaId, InstNo}),
+	
+	if 
+		is_record(Inst, inst) andalso Ballot >  Inst#inst.ballot -> %is_record means it is not false, meaning record exists
+			ets:insert(inst, #inst{key = {ReplicaId, InstNo}
+											, cmd  = Command
+											, deps = Deps
+											, seq = Seq 
+											, state = prepared}),
+			make_call([LeaderReplica], 1, eepaxos_process, explicit_prepare_response, 
+				[ReplicaId, InstNo, Command, Deps, Seq, Inst#inst.state]);
+		true -> % not newer. As in paxos algorithm, reply with NACK 
+			make_call([LeaderReplica], 1, eepaxos_process, explicit_prepare_response, [ReplicaId, InstNo, nack, undefined, undefined, undefined])
+	end, 
+	error_logger:info_msg("finishing handle_cast(explicit_prepare_request).~n"),
+	{noreply, State};
+handle_cast({explicit_prepare_response, ReplicaId, InstNo, Command, Deps, Seq, PrevState}, State) ->
+	error_logger:info_msg("acceptor (~w) explicit_prepare_response- ~w ~w ~w ~w ~w~n", [node(), ReplicaId, InstNo, Command, Deps, Seq]),
+	Inst = ets:lookup(inst, {ReplicaId, InstNo}),
+	Lbk = ets:lookup(lbk, {ReplicaId, InstNo}),
+	if Inst#inst.state > commited or Inst#inst.state > accepted -> % moved on
+		{noreply, State};
+		true ->
+		
+			case  PrevState of
+				% if any commited node exist, send commit
+				commited -> 
+					ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, commited}),
+					runCommit(State);
+				accepted ->
+					ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, accepted}),
+					runAccept(State)
+			end,
+			PrepOks = Lbk#lbk.prepareoks + 1,
+			
+			if PrepOks > 
+			
+			
+			
+			ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, commited}),
+			{noreply, State}
+	end;
+handle_cast({try_preaccept_request, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
+	error_logger:info_msg("acceptor (~w) try_preaccept_request- ~w ~w ~w ~w ~w~n", [node(), ReplicaId, InstNo, Command, Deps, Seq]),
+	%update instance with commited state. protocol ends
+	ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, commited}),
 	{noreply, State}.
 
 %start accept phase
-runAccept({ReplicaId, InstNo, Command, Deps, Seq}, State) ->
+runAccept({LeaderId, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
 	error_logger:info_msg("leader executes process:runAccept~n"),
 	ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, accepted}),
 	ets:update_element(lbk, {ReplicaId, InstNo}, {#lbk.acceptoks, 1}),
@@ -351,23 +447,35 @@ runCommit({State, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
 	error_logger:info_msg("~w", [ets:lookup(inst, {ReplicaId, InstNo})]),
 	%TODO: notify client 
 	
+	
 	%Broadcast
 	% no need to send to local instance since already updated
 	%rpc:multicall(State#state.replicas, eepaxos_process, commit_request, [ReplicaId, InstNo, Command, Deps, Seq]),
 	make_call(lists:subtract(State#state.replicas, [node()]), length(State#state.replicas)-1, eepaxos_process, commit_request, [ReplicaId, InstNo, Command, Deps, Seq]),
 	State.
 
+
 code_change(_OldVsn, _State, _Extra) -> ok.
 handle_info(_Info, _State) -> ok.
 terminate(_Reason, _State) -> ok.
 
-%TODO: how to handle when failing to send all the quorum?
 make_call(NodeList, Num, Module, Fun, Args) ->
-	catch lists:foldr(
-		fun(_, 0) -> 
-			throw(break_foreach);
-			(Node, Cnt) ->
-				rpc:call(Node, Module, Fun, Args),
-				%{tester, 'tester@'} ! {Node, Module, Fun, Args},
-				Cnt-1
-		end, Num, NodeList).
+	try lists:foldr(
+			fun(_, 0) -> 
+				throw(all_sent);
+				(Node, Cnt) ->
+					Result = rpc:call(Node, Module, Fun, Args),
+					if 
+						ok =:= Result -> 
+							error_logger:info_msg("debug ~w~n", [Cnt]),
+							Cnt-1;
+						true -> Cnt	
+					end
+			 end, Num, NodeList) of
+		Num when Num > 0 -> {error, fail_to_send_quorum};
+		_ -> ok
+	catch
+		all_sent ->
+			ok;
+		_ -> {error, unknown_failure}
+	end.
