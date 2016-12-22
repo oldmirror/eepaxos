@@ -25,12 +25,12 @@ start_link() ->
 init([]) ->
     {ok, { {one_for_one, 5, 10}, 
 	[
-		{eepaxos_process
-		,{eepaxos_process, start_link, []}
+		{eepaxos_per_vn_sup
+		,{eepaxos_per_vn_sup, start_link, []}
 		,permanent
 		,infinity
-		,worker
-		,[eepaxos_process]
+		,supervisor
+		,[eepaxos_per_vn_sup]
 		}
 	]
 	}}.
