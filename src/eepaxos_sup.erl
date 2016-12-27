@@ -23,14 +23,15 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
+	error_logger:info_msg("sup called"),
     {ok, { {one_for_one, 5, 10}, 
 	[
-		{eepaxos_per_vn_sup
-		,{eepaxos_per_vn_sup, start_link, []}
-		,permanent
+		{eepaxos_vn_parent
+		,{eepaxos_vn_parent, start_link, []}
+		,temporary
 		,infinity
 		,supervisor
-		,[eepaxos_per_vn_sup]
+		,[eepaxos_vn_parent]
 		}
 	]
 	}}.

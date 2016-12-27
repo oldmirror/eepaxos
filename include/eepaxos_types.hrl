@@ -96,6 +96,7 @@
 		,preparing
 		,tryingtopreaccept
 		,possiblequorum
+		,clientProposals  
 		}).
 
 -record(recoveryInst, {key
