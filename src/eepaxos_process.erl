@@ -6,11 +6,11 @@
 	terminate/2]).
 
 -export([start_link/2, init/1, 
-		propose/2,
-		preaccept_request/1,
-		preaccept_handle/1,
-		paxos_accept_request/1,
-		paxos_accept_response/1,
+		propose/3,
+		preaccept_request/2,
+		preaccept_handle/2,
+		paxos_accept_request/2,
+		paxos_accept_response/2,
 		handle_call/3,
 		handle_cast/2, 
 		do_preaccept_req/3, 
@@ -18,7 +18,7 @@
 		runCommit/3,
 		runAccept/2,
 		startPhase1/0,
-		commit_request/1,
+		commit_request/2,
 		make_call/5]).
 
 -record(state, {instNo =0, % instance number
@@ -28,23 +28,25 @@
 				numToSend = 0 :: integer(),
 				totalReplicaNo = 1 :: integer(),
 				epoch = 0}).
+
 start_link(PartitionId, ReplicaId) ->
 	error_logger:info_msg("process:start_link ~w~n", [PartitionId]),
-	gen_server:start_link({local, ?MODULE}, ?MODULE, [PartitionId, ReplicaId], []).
+	gen_server:start_link({local, list_to_atom(atom_to_list(?MODULE) ++ atom_to_list(PartitionId))}
+						, ?MODULE
+						, [PartitionId, ReplicaId]
+						, []).
 
 init([PartitionId, ReplicaId]) -> 
 	error_logger:info_msg("init"),
-	ets:new(inst, [ordered_set, named_table, {keypos, #inst.key}, public, {write_concurrency, true}, {read_concurrency, true}]),
-	ets:new(lbk, [ordered_set, named_table, {keypos, #lbk.key}, public, {write_concurrency, true}, {read_concurrency, true}]),
-	ets:new(test_result, [set, named_table, public]),
-	ets:new(conflicts, [set, named_table, public]),
-
+	InstTab = ets:new(inst, [ordered_set, named_table, {keypos, #inst.key}, public, {write_concurrency, true}, {read_concurrency, true}]),
+	LbkTab = ets:new(lbk, [ordered_set, named_table, {keypos, #lbk.key}, public, {write_concurrency, true}, {read_concurrency, true}]),
+	TRTab = ets:new(test_result, [set, named_table, public]),
+	ConfTab = ets:new(conflicts, [set, named_table, public]),
 
 	ets:new(maxSeqPerKey, [ordered_set, named_table, public]),
 	Replicas = [1, 2, 3],
 	NoFQuorum = trunc(length(Replicas)/2),
 	
-
 	 {ok, #state{
 		instNo = 0, 
 		replicaId = ReplicaId,
@@ -54,45 +56,46 @@ init([PartitionId, ReplicaId]) ->
 		}}. 
 
 % local call made by client. Returns after 
--spec propose(atom(), atom()) -> ok | {error, invalid_param}.
-propose(Pid, Command) when record(Command, eepaxos_command) ->
+-spec propose(atom(), atom(), atom()) -> ok | {error, invalid_param}.
+propose(PartitionId, Pid, Command) when record(Command, eepaxos_command) ->
 	%Key = Command#eepaxos_command.key
 	error_logger:info_msg("process:proposed~n"),
-	gen_server:cast(?MODULE, {propose, Pid, Command});
-propose(Pid, Command) -> {error, invalid_param}.
+	gen_server:cast(PartitionId, {propose, Pid, Command});
+propose(PartitionId, Pid, Command) -> {error, invalid_param}.
 
-commit_request(CommitReq) ->
+commit_request(PartitionId, CommitReq) ->
 	error_logger:info_msg("process:commit_reqest~n"),
-	gen_server:cast(?MODULE, {commit_request, CommitReq}).
+	gen_server:cast(PartitionId, {commit_request, CommitReq}).
 
-preaccept_request(PAReq) when is_record(PAReq, preaccept_request) ->
+preaccept_request(PartitionId, PAReq) when is_record(PAReq, preaccept_request) ->
 	error_logger:info_msg("process:preaccept_request~n"),
-	gen_server:cast(?MODULE, {preaccept_request, PAReq}).
+	gen_server:cast(PartitionId, {preaccept_request, PAReq}).
 
-preaccept_handle(PAResp) when is_record(PAResp, preaccept_response) ->
+preaccept_handle(PartitionId, PAResp) when is_record(PAResp, preaccept_response) ->
 	error_logger:info_msg("process:preaccept_response~n"),
 	gen_server:cast(?MODULE, {preaccept_handle, PAResp}).
 
-paxos_accept_request(PAReq) when is_record(PAReq, accept_request) ->
+paxos_accept_request(PartitionId, PAReq) when is_record(PAReq, accept_request) ->
 	error_logger:info_msg("process:paxos_accept_request called~n"),
 	gen_server:cast(?MODULE, {paxos_accept_request, PAReq}).
 
-paxos_accept_response(PAResp) when is_record(PAResp, accept_response) ->
+paxos_accept_response(PartitionId, PAResp) when is_record(PAResp, accept_response) ->
 	error_logger:info_msg("process:paxos_accept_response called~n"),
 	gen_server:cast(?MODULE, {paxos_accept_response, PAResp}).
 
-start_prepare(InstKey) ->
+start_prepare(PartitionId, InstKey) ->
 	error_logger:info_msg("process:start_prepare~n"),
 	gen_server:cast(?MODULE, {start_explicit_prepare, InstKey}).
 
-explicit_prepare_request(EPReq) when is_record(EPReq, prepare_request) ->
+explicit_prepare_request(PartitionId, EPReq) when is_record(EPReq, prepare_request) ->
 	error_logger:info_msg("process:paxos_accept_response called~n"),
 	gen_server:cast(?MODULE, {explicit_prepare_request, EPReq}).
 
-explicit_prepare_response(EPResp) when is_record(EPResp, prepare_response)  ->
+explicit_prepare_response(PartitionId, EPResp) when is_record(EPResp, prepare_response)  ->
 	error_logger:info_msg("process:paxos_accept_response called~n"),
 	gen_server:cast(?MODULE, {explicit_prepare_response, EPResp}).
 
+handle_call(stop, From, State) -> {stop, normal, ok, State};
 handle_call(_, From, State) -> {reply, reply, State}.
 
 handle_cast({propose, Pid, Command}, State) ->
@@ -580,7 +583,7 @@ terminate(_Reason, _State) -> ok.
 make_call(NodeList, Num, Module, Fun, Args) ->
 	error_logger:info_msg("make_call called ~w~n", [Args]),
 	ets:insert(test_result, {1, Args}),
-	[E | _T] = ets:lookup(lbk, element(2, Args)),
+	[E | _T] = ets:lookup(lbk, element(4, Args)),
 	#lbk{clientProposals = CP } = E,
 	CP ! msg.
 
