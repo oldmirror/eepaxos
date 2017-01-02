@@ -7,33 +7,8 @@
 % Test output from propose request. Process module ough to generate preaccept_request with deps and seq based on current state
 % which is set by this test cases
 run_test_() ->
-	[{"propose is ", {setup, fun start/0, fun stop/1, fun preaccept_fresh/1}}
-	,{"there's interfering instance.", {setup, fun start/0, fun stop/1, fun propose_interfering_one/1}}].
-
-start() ->
-	ets:new(membership, [set, named_table, public, {read_concurrency, true}, {write_concurrency, true}]),
-	ets:insert(membership, {total, 3}),
-	ets:insert(membership, {quorum, 2}),
-	ets:insert(membership, {1, 'a'}),
-	ets:insert(membership, {2, 'b'}),
-	ets:insert(membership, {3, 'c'}),
-	PartitionId = vn0,
-	ReplicaId = ?REPLICA_ID,
-	
-	Members = [1, 2, 3],
-	
-	{ok, Pid} = eepaxos_process:start_link(PartitionId, ReplicaId),
-	Pid.
-
-stop(Pid) ->
-	io:format(user, "stop pid ~w~n", [Pid]),
-	ets:delete(membership),
-	ets:delete(inst),
-	ets:delete(conflicts),
-	ets:delete(lbk),
-	ets:delete(maxSeqPerKey),
-	%exit(Pid, kill).
-	gen_server:call(Pid, stop).
+	[{"propose is ", {setup, fun process_testing_util:start/0, fun process_testing_util:stop/1, fun preaccept_fresh/1}}
+	,{"there's interfering instance.", {setup, fun process_testing_util:start/0, fun process_testing_util:stop/1, fun propose_interfering_one/1}}].
 
 % With no depedency, process generates message with no deps and seq as 1.
 preaccept_fresh(Pid) ->
