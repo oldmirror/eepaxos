@@ -1,6 +1,14 @@
 -type eepaxos_operation() :: set | increment | delete | decrement | update.
 -type ballot_num() :: {atom(), atom(), atom()}.
--type inst_state() :: undetermined | preaccepted | prepared | accepted | committed | executed.
+
+-define(ST_UNDETERMINED, undetermined).
+-define(ST_PREACCEPTED, preaccepted).
+-define(ST_ACCEPTED, accepted).
+-define(ST_COMMITTED, committed).
+-define(ST_PREPARED, prepared).
+-define(ST_EXECUTED, executed).
+
+-type inst_state() :: ?ST_UNDETERMINED| ?ST_PREACCEPTED | ?ST_PREPARED | ?ST_PREACCEPTED | ?ST_COMMITTED | ?ST_EXECUTED.
 
 -record(eepaxos_command, {operation :: eepaxos_operation(), key, value}).
 
@@ -81,6 +89,9 @@
 		, cmd  = #eepaxos_command{}
 		, deps = []
 		, seq = -1
+		, index
+		, lowlink
+		, onstack
 		, state = undefined :: state()
 		, last_modified}).
 	
@@ -96,13 +107,15 @@
 		,preparing
 		,tryingtopreaccept
 		,possiblequorum
-		,clientProposals  
+		,clientProposals :: pid() 
 		}).
 
 -record(recoveryInst, {key
 				, cmd  = #eepaxos_command{}
 				, deps = []
 				, seq = -1
+				, idx
+				, lowlin
 				, state = undefined :: state()
 				, hasOriginalResponded
 				, preacceptCnt

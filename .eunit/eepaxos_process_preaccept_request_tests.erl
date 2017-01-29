@@ -50,10 +50,7 @@ preaccept_request_ok(Pid) ->
 	receive
 		_ -> [{1, N} | _T] = ets:lookup(test_result, 1),
 		io:format(user, "~w", [N]),
-		[
-		?_assertNot(N#preaccept_response.is_changed)
-		, ?_assertEqual(Expected#preaccept_response.inst_key, N#preaccept_response.inst_key)
-		]
+		[?_assertNot(N#preaccept_response.is_changed), ?_assertEqual(Expected#preaccept_response.inst_key, N#preaccept_response.inst_key)]
 	after
 		3000 -> N = {error, no},
 		?_assert(false)
