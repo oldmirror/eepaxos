@@ -1,5 +1,5 @@
 %% takes care of communication with client. Client communication is synchronous. 
--module(eepaxos_frontend).
+-module(eepaxos_client_proxy).
 -include("../include/eepaxos_types.hrl").
 -export([block_call/2, async_call/2, cast/2]).
 

@@ -9,6 +9,7 @@ start() ->
 	ets:insert(membership, {2, 'b'}),
 	ets:insert(membership, {3, 'c'}),
 	ets:new(test_result, [set, named_table, public]),
+	ets:insert(test_result, {2, self()}),
 	PartitionId = vn0,
 	ReplicaId = ?REPLICA_ID,
 	

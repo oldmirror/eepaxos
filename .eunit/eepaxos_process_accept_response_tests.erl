@@ -12,11 +12,11 @@ run_test_() ->
 	].
 
 accept_response_all_resp(Pid) ->
-	io:format(user, "accept_response_all_resp", []),
+	io:format(user, "FUNCTION_LABEL: accept_response_all_resp", []),
 	Cmd = #eepaxos_command{operation = set, key = k, value = 1},
 
 	Inst = #inst{key = {1, 1}
-			, ballot = {0, 0, 0}
+			, ballot = {0, 0, 1}
 			, cmd  = Cmd
 			, deps = []
 			, seq = 1
@@ -32,10 +32,10 @@ accept_response_all_resp(Pid) ->
 
 	ets:insert(inst, Inst),
 	ets:insert(lbk, Lbk),
-	%ets:insert(conflicts, {}),
-	%ets:insert(maxSeqPerKey, {}),
+	ets:insert(conflicts, {{1, k}, 1}),
+	ets:insert(maxSeqPerKey, {k, 1}),
 
-	eepaxos_process:accept_response(Pid, #accept_response{inst_key = {1, 1}}),
+	eepaxos_process:paxos_accept_response(Pid, #accept_response{inst_key = {1, 1}}),
 	Expected = #commit_request{inst_key = {1, 1}
 				, cmd = Cmd
 				, deps = []
@@ -51,9 +51,12 @@ accept_response_all_resp(Pid) ->
 			?_assert(false)
 	end.
 
-accept_response_nack(Pid) -> ?_assert(true).
+accept_response_nack(Pid) ->
+	io:format(user, "FUNCTION_LABEL: accept_response_nack", []),
+	?_assert(true).
 
 accept_response_ignore_additional(Pid) ->
+	io:format(user, "FUNCTION_LABEL: accept_response_ignore_additional", []),
 	Cmd = #eepaxos_command{operation = set, key = k, value = 1},
 	Inst = #inst{key = {1, 1}
 			, ballot = {0, 0, 0}
@@ -75,7 +78,7 @@ accept_response_ignore_additional(Pid) ->
 %	ets:insert(conflicts, {}),
 %	ets:insert(maxSeqPerKey, {}),
 
-	eepaxos_process:accept_response(Pid, #accept_response{inst_key = {1, 1}}),
+	eepaxos_process:paxos_accept_response(Pid, #accept_response{inst_key = {1, 1}}),
 	receive
 		_ ->
 			case ets:lookup(test_result, 1) of

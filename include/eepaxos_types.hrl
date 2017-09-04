@@ -31,9 +31,7 @@
 		{ballot :: ballot_num()
 		, leader
 		, inst_key
-		, cmd
-		, deps :: list()
-		, seq}).
+		}).
 
 -record(accept_response,
 		{inst_key
@@ -43,7 +41,8 @@
 		}).
 
 -record(commit_request,
-		{inst_key
+		{ballot :: ballot_num()
+		,inst_key
 		, cmd
 		, deps :: list()
 		, seq :: integer()}).

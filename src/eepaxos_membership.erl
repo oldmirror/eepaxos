@@ -17,13 +17,24 @@
 				, partitionId
 				}).
 
+members = [].
+
+members_pending = []. % nodes being added
+
+members_alive = [].
+
 % bare minimum implementation
 % dynamic reconfiguration should be added
 
-start(PartitionId) ->
+start(PartitionId, Members) ->
+	St = #state{members = Members},
 	gen_server:start(PartitionId, ?MODULE, [PartitionId], []).
 	
-join(Node) when is_atom(Node)-> 
+rejoin(Node) when is_atom(Node)-> % recover from crash
+	State#state{members 
+	ok = gen_server:call(?MODULE, {join, Node}).
+
+join(Node) when is_atom(Node)-> % reconfiguration
 	ok = gen_server:call(?MODULE, {join, Node}).
 
 remove(Node) ->
@@ -35,6 +46,12 @@ init([PartitionId, Members]) ->
 
 handle_call({join, Node}, From,  State) ->
 	State1 = State#state{alive_members = State#state.alive_members ++ Node},
+	{reply, ok, State1};
+handle_call({rejoin, Node}, From, State) ->
+	State1 = State#state{alive_members = State#state.alive_members - Node},
+	{reply, ok, State1};
+handle_call({leave, Node}, From, State) ->
+	State1 = State#state{alive_members = State#state.alive_members - Node},
 	{reply, ok, State1};
 handle_call({join, Node}, From, State) ->
 	State1 = State#state{alive_members = State#state.alive_members - Node},

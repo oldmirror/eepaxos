@@ -5,6 +5,10 @@ This libarary runs in multiple nodes and guarantees to generates same output.
 
 Hot to use this library
 
+Architecture
+
+
+
 Starting the application
 	Application must be started in each Erlang VM.
 	
@@ -19,6 +23,8 @@ Initialize local replica
 
 	Run the above command for multipl replicas in the node such as for vnodes. Eepaxos objects for each replica can be identified by ReplicaName.
 
+	In case where there are multiple replica sets for a node, eepaxos should be instantiated as many as the number of replica sets. 
+
 
 Starting cluster
 	eepaxos_manager:start_cluster(Available, Timeout).
@@ -26,7 +32,20 @@ Starting cluster
 	all: All the replica
 	minimum: Minumum node required = N = F/2 +1 
 
-Joining the cluster
+Recovery
+	After a node crashes, other nodes in the cluster are likely to advance. Since we assume client application takes snapshot 
+and stores checkpoint when Eepaxos notifies, recovering node only need to pull in log entries after checkpoint from other nodes.
+It should only pull in committed entries.
+Checkpoint could take place and logs are discarded in all the other nodes. In this case, client app should Once the recovering node is brought to some point and join the communication,
+its executor will initiate explicit prepare so missing logs will be filled in. Requests sent after node becomes online will be appended 
+as normally.
+
+	* Most database systems have redo logs to avoid frequent disk writes. This log file is often located in separate I/O port in sequential access media.
+	write operations take place in memory changing contents. We should assume that Eepaxos execute up-call performs write to log file of client system.
+	In this case, every execute operation of eepaxos can be viewed as checkpoint.
+
+Joining the cluster(reconfiguration)
+	
 	eepaxos_manager:join(NodeList).
 
 Proposing operations
@@ -43,6 +62,6 @@ Proposing operations
 	On the successful proposal, it return to the client. In the background, eepaxos performs consensus algorithm and execute 
 
 Integration execution engine
-	eepaxos needs to know how to perform execution(actual write) to the client data set so integration work is required. 
-
+	eepaxos needs to know how to perform execution(actual write) to the client data set so integration work is required.  
 Sample
+

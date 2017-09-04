@@ -1,5 +1,4 @@
--module(eepaxos_process).
--behavior(gen_server).
+-module(eepaxos_process).  -behavior(gen_server).
 -include("../include/eepaxos_types.hrl").
 -export([code_change/3,
 	handle_info/2,
@@ -164,25 +163,27 @@ handle_cast({propose, Pid, Command}, State) ->
 handle_cast({preaccept_request, PAReq}, State) ->
 	error_logger:info_msg("Acceptor(~w) executes handle_cast(preaccept_request)~n", [State#state.replicaId]),
 	Inst = ets:lookup(inst, PAReq#preaccept_request.inst_key),
-	
-	if Inst =/= false andalso Inst#inst.ballot >= PAReq#preaccept_request.ballot -> % already accepted higher ballot
+	error_logger:info_msg("Inst - ~w, inst_key -~w", [Inst, PAReq#preaccept_request.ballot]),
+
+	case Inst of
+		[#inst{ballot=InstBallot}] when InstBallot >= PAReq#preaccept_request.ballot -> 
 			{noreply, State};
-		Inst =/= false andalso 
-				(Inst#inst.state == ?ST_ACCEPTED orelse 
-				Inst#inst.state == ?ST_COMMITTED orelse 
-				Inst#inst.state == ?ST_EXECUTED
+		[#inst{state = InstState}] when 
+				(InstState == ?ST_ACCEPTED orelse 
+				InstState == ?ST_COMMITTED orelse 
+				InstState == ?ST_EXECUTED
 				) ->
-			% voting has been completed. it does nothing rather rather than starting new paxos since it's on instance.
+			% voting has been completed. it does nothing other than starting new paxos since it's on instance.
 			%TODO handle reordered acceptted/committed
 			{noreply, State};
-		true ->
+		_ ->
 			State1 = do_preaccept_req(State, PAReq, Inst), % update deps and seq. update local tables. make response.
 			{noreply, State1}
 	end;
 
 handle_cast({preaccept_handle, PARes}, State) ->
 	error_logger:info_msg("leader executes handle_cast(preaccept_response)"),
-	[Inst | _T] = ets:lookup(inst, PARes#prepare_response.inst_key),
+	[Inst | _T] = ets:lookup(inst, PARes#preaccept_response.inst_key),
 
 	if Inst#inst.state > preaccept -> %instance might have met quorum requirement and moved on
 			{noreply, State};
@@ -217,40 +218,38 @@ handle_cast({preaccept_handle, PARes}, State) ->
 handle_cast({paxos_accept_request, AcceptReq}, State) -> 
 	error_logger:info_msg("acceptor(~w) executes handle_cast(paxos_accept_request)~n", [State#state.replicaId]),
 	Inst = ets:lookup(inst, AcceptReq#accept_request.inst_key),
-	if Inst =/= false andalso Inst#inst.ballot > AcceptReq#accept_request.ballot -> % new leader is handling this
+
+	case Inst of
+		[Inst1] when Inst1#inst.ballot > AcceptReq#accept_request.ballot -> % new leader is handling this
 			{noreply, State};
-		Inst =/= false andalso Inst#inst.state >= accepted -> % voting has been completed. TODO: CMU Go impl checks committed and executed only.
+		[Inst1] when Inst#inst.state =:= ?ST_ACCEPTED 
+				orelse Inst#inst.state =:= ?ST_COMMITTED
+				orelse Inst#inst.state =:= ?ST_EXECUTED -> % voting has been completed. TODO: CMU Go impl checks committed and executed only.
 			{noreply, State};
-		true -> 
+		_->
 			ets:insert(inst, #inst{key = AcceptReq#accept_request.inst_key
 						, ballot = AcceptReq#accept_request.ballot
-						, cmd  = AcceptReq#accept_request.cmd
-						, deps = AcceptReq#accept_request.deps
-						, seq = AcceptReq#accept_request.seq 
 						, state = accepted}),
 			make_call([AcceptReq#accept_request.leader]
 				, 1, eepaxos_process, paxos_accept_response
-				, [#accept_response{inst_key = AcceptReq#accept_request.inst_key
-%									, cmd = AcceptedReq#accept_request.cmd
-%									, deps = AcceptedReq#accept_request.deps
-%									, seq = AcceptedReq#accept_request.seq
-}]),
+				, #accept_response{inst_key = AcceptReq#accept_request.inst_key}),
 			error_logger:info_msg("finishing handle_cast(paxos_accept_request).~n"),
 			{noreply, State}
 	end;
 
 handle_cast({paxos_accept_response, AcceptResp}, State) -> 
 	error_logger:info_msg("leader handle_cast(paxos_accept_response)~n"),
-	Inst = ets:lookup(inst, AcceptResp#accept_response.inst_key), 
+	[Inst] = ets:lookup(inst, AcceptResp#accept_response.inst_key), %assume inst exist
 	if Inst#inst.state > accepted -> % finished processing
+	%TODO: error if before accepted
 			{noreply, State};
 		true -> 
-			I = ets:lookup_element(lbk, AcceptResp#accept_request.inst_key, #lbk.acceptoks) + 1,
-			ets:update_element(lbk, AcceptResp#accept_request.inst_key, {#lbk.acceptoks, I}),
+			I = ets:lookup_element(lbk, AcceptResp#accept_response.inst_key, #lbk.acceptoks) + 1,
+			ets:update_element(lbk, AcceptResp#accept_response.inst_key, {#lbk.acceptoks, I}),
 			
 			State2  = if 
 				I >= State#state.numToSend -> 
-					runCommit(Inst, ets:lookup(lbk, Inst#inst.key), State);
+					runCommit(Inst, [N] = ets:lookup(lbk, Inst#inst.key), State);
 				true -> State
 			end,
 			error_logger:info_msg("finishing handle_cast(paxos_accept_response)~n"),
@@ -259,16 +258,40 @@ handle_cast({paxos_accept_response, AcceptResp}, State) ->
 
 handle_cast({commit_request, CommitReq}, State) ->
 	error_logger:info_msg("acceptor (~w) commit_request - ~w ~w ~w ~w ~w~n", [State#state.replicaId, CommitReq]),
-	%update instance with commited state. protocol ends
-	ets:insert(inst, CommitReq#commit_request.inst_key
-				, #inst{ballot = CommitReq#commit_request.inst_key
-					, cmd = CommitReq#commit_request.cmd
-					, deps = CommitReq#commit_request.deps
-					, seq = CommitReq#commit_request.seq
-					, state= commited}),
+	case ets:lookup(inst, CommitReq#commit_request.inst_key) of
+		[Inst] when
+		Inst#inst.state =:= ?ST_COMMITTED orelse
+		Inst#inst.state =:= ?ST_EXECUTED ->
+			{noreply, State};
+		true ->
+			%update instance with commited state.
+			ets:insert(inst, CommitReq#commit_request.inst_key
+						, #inst{ballot = CommitReq#commit_request.ballot
+							, key = CommitReq#commit_request.inst_key
+							, cmd = CommitReq#commit_request.cmd
+							, deps = CommitReq#commit_request.deps
+							, seq = CommitReq#commit_request.seq
+							, state= ?ST_COMMITTED}),
 
-	eepaxos_execute_process:execute(State#state.partitionId, CommitReq#commit_request.inst_key),
-	{noreply, State};
+			Key = CommitReq#commit_request.cmd#eepaxos_command.key,
+			Seq = CommitReq#commit_request.seq,
+
+			case ets:lookup(maxSeqPerKey, Key) of
+				[{Key, CurSeq}] when CurSeq < CommitReq#commit_request.seq ->
+					ets:insert(maxSeqPerKey, {Key, Seq})
+			end,
+
+			ReplicaId = element(1, CommitReq#commit_request.inst_key),
+			InstNo = element(2, CommitReq#commit_request.inst_key),
+
+			case ets:lookup(conflicts, {ReplicaId, Key}) of
+				[{ConfKey, CurInstNo}] when CurInstNo < InstNo ->
+					ets:insert(conflicts, {ConfKey, InstNo})
+			end,
+
+			eepaxos_execute_process:execute(State#state.partitionId, CommitReq#commit_request.inst_key),
+			{noreply, State}
+	end;
 
 handle_cast({start_explicit_prepare, InstanceKey}, State) ->
 	error_logger:info_msg("new leader(~w) start_explicit_prepare- ~w ~w ~w ~w ~w~n", [node(), InstanceKey]),
@@ -315,11 +338,11 @@ handle_cast({start_explicit_prepare, InstanceKey}, State) ->
 			end,
 
 			make_call(lists:subtract(State#state.replicas, [State#state.replicaId]), State#state.numToSend, eepaxos_process,
-						explicit_prepare_request, [
-							#prepare_request{ballot = Inst#inst.ballot, leader = State#state.replicaId
+						explicit_prepare_request, 
+						#prepare_request{ballot = Inst#inst.ballot
+							, leader = State#state.replicaId
 							, inst_key = Inst#inst.key
-							}
-						]),
+							}),
 			{noreply, State}
 	end;
 
@@ -342,7 +365,7 @@ handle_cast({explicit_prepare_request, EPReq}, State) ->
 
 			% respond with previous information
 			make_call([EPReq#prepare_request.leader], 1, eepaxos_process, explicit_prepare_response, 
-				[#prepare_response{inst_key = Inst1#inst.key
+				#prepare_response{inst_key = Inst1#inst.key
 								, cmd = Inst1#inst.cmd
 								, deps = Inst1#inst.deps
 								, seq = Inst1#inst.seq
@@ -351,7 +374,7 @@ handle_cast({explicit_prepare_request, EPReq}, State) ->
 									% compare replicaId and ballot
 									if element(1,Inst1#inst.key) -> true;
 										 true -> false
-									end}]),
+									end}),
 			error_logger:info_msg("finishing handle_cast(explicit_prepare_request).~n"),
 			{noreply, State}
 	end;
@@ -363,13 +386,14 @@ handle_cast({explicit_prepare_response, EPResp}, State) ->
 
 	if Lbk#lbk.preparing =/= true -> % dropped
 			{noreply, State};
-		EPResp#prepare_response.prev_status >= committed ->
+		EPResp#prepare_response.prev_status =:= ?ST_COMMITTED orelse
+		EPResp#prepare_response.prev_status =:= ?ST_EXECUTED ->
 			runCommit(Inst, Lbk, State),
 			ets:update_element(lbk, EPResp#prepare_response.inst_key, {#lbk.preparing, false}),
 			{noreply, State};
 		true ->
 			PPedOk = Lbk#lbk.prepareoks + 1,
-			ets:update_element(lbk, update),
+			ets:update_element(lbk, updae),
 			
 
 			RecoveryInst = ets:lookup(recoveryInst, EPResp#prepare_response.inst_key),
@@ -421,7 +445,6 @@ handle_cast({try_preaccept_request, ReplicaId, InstNo, Command, Deps, Seq}, Stat
 	%update instance with commited state. protocol ends
 	ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, commited}),
 	{noreply, State}.
-
 %===================================
 % Internal functions
 %===================================
@@ -430,27 +453,31 @@ do_preaccept_req(State, PAReq, Inst) when Inst#inst.ballot >= PAReq#preaccept_re
 do_preaccept_req(State, PAReq, Inst) when Inst#inst.state > accepted ->
 	State;
 do_preaccept_req(State, PAReq, Inst) when is_record(State, state) andalso is_record(PAReq, preaccept_request) ->
+	Key = PAReq#preaccept_request.cmd#eepaxos_command.key,
 	Updated = make_ref(),
 	put(Updated, false),
 	% update attributes
-	Deps1 = lists:foldl(fun(DepElem, Accum) -> 
-		{FoldingReplicaId, FoldingInstNo} = DepElem,
-		case ets:lookup(FoldingReplicaId, PAReq#preaccept_request.cmd#eepaxos_command.key) of
-			[]-> [DepElem | Accum];
-			[{_, InstNoConf} | _] -> 
-				if 
-					InstNoConf > FoldingInstNo -> 
-						put(Updated, true),
-						[{FoldingReplicaId, InstNoConf} | Accum];
-					true ->
-						[DepElem | Accum]
-				end
-		end
-	end, [], PAReq#preaccept_request.deps),
+	Deps1 = lists:foldl(fun(ReplicaId, Accum) -> 
+		DepInstNo = % if not present, set -1
+			case lists:keyfind(Key, 1, PAReq#preaccept_request.deps) of
+				false -> -1;
+				{Key, N} -> N
+			end,
 
-	SeqNew = case ets:lookup(maxSeqPerKey, PAReq#preaccept_request.cmd#eepaxos_command.key) of
+		case ets:lookup(conflicts, {ReplicaId, Key}) of
+			[{_, InstNoConf}] when InstNoConf > DepInstNo -> % there's something in local and that's larger than incoming
+				put(Updated, true),
+				[{ReplicaId, InstNoConf}| Accum];
+			_ when DepInstNo > 0 ->  % no record in conflic OR not larger
+				[{ReplicaId, DepInstNo} | Accum];
+			_ -> 
+				 Accum
+		end
+	end, [], State#state.replicas),
+
+	SeqNew = case ets:lookup(maxSeqPerKey, Key) of
 		[] -> PAReq#preaccept_request.seq;
-		[{_, MaxSeq} | _T] -> 
+		[{_, MaxSeq}] -> 
 			SeqNewCandid = MaxSeq + 1,
 			if 
 				SeqNewCandid > PAReq#preaccept_request.seq -> 
@@ -459,6 +486,8 @@ do_preaccept_req(State, PAReq, Inst) when is_record(State, state) andalso is_rec
 				true -> PAReq#preaccept_request.seq
 			end
 	end,
+
+	% end update attributes
 
 	% update local data
 	ets:insert(inst, #inst{
@@ -469,10 +498,9 @@ do_preaccept_req(State, PAReq, Inst) when is_record(State, state) andalso is_rec
 		, seq = SeqNew
 		, state = preaccepted}),
 	
-	ets:insert(maxSeqPerKey, {PAReq#preaccept_request.cmd#eepaxos_command.key, SeqNew}),
 
-	ets:insert(conflicts, {{element(1, PAReq#preaccept_request.inst_key), PAReq#preaccept_request.cmd#eepaxos_command.key}
-					, element(2, PAReq#preaccept_request.inst_key)}),
+	ets:insert(maxSeqPerKey, {PAReq#preaccept_request.cmd#eepaxos_command.key, SeqNew}),
+	ets:insert(conflicts, {{element(1, PAReq#preaccept_request.inst_key), Key}, element(2, PAReq#preaccept_request.inst_key)}),
 
 	Change = 
 	case get(Updated) of
@@ -562,8 +590,18 @@ runAccept({LeaderId, ReplicaId, InstNo, Command, Deps, Seq}, State) ->
 	error_logger:info_msg("leader executes process:runAccept~n"),
 	ets:update_element(inst, {ReplicaId, InstNo}, {#inst.state, accepted}),
 	ets:update_element(lbk, {ReplicaId, InstNo}, {#lbk.acceptoks, 1}),
-	%rpc:multicall(State#state.replicas, eepaxos_process, paxos_accept_request, [ReplicaId, InstNo, Command, Deps, Seq]).
-	make_call(lists:subtract(State#state.replicas, [State#state.replicaId]), State#state.numToSend, eepaxos_process, paxos_accept_request, [ReplicaId, InstNo, Command, Deps, Seq]),
+
+	AcceptReq = #accept_request{ballot = {State#state.epoch, 0, State#state.replicaId}
+								, leader = State#state.replicaId
+								, inst_key = {ReplicaId, InstNo}
+								},
+
+	make_call(lists:subtract(State#state.replicas, [State#state.replicaId])
+				, State#state.numToSend
+				, eepaxos_process
+				, paxos_accept_request
+				, AcceptReq
+			),
 	error_logger:info_msg("finishing executes process:runAccept~n").
 
 %start commit phase
@@ -576,11 +614,11 @@ runCommit(Inst, Lbk, State) ->
 	
 	%Broadcast
 	make_call(lists:subtract(State#state.replicas, [State#state.replicaId]), length(State#state.replicas)-1, eepaxos_process, commit_request
-		, [#commit_request{inst_key = Inst#inst.key
+		, #commit_request{inst_key = Inst#inst.key
 							, cmd = Inst#inst.cmd
 							, deps = Inst#inst.deps
 							, seq = Inst#inst.seq
-						}]),
+						}),
 	State.
 
 code_change(_OldVsn, _State, _Extra) -> ok.
